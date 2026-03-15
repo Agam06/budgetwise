@@ -148,8 +148,13 @@ export default function BudgetWise() {
 
   // ── SAVE to Supabase whenever data changes ──
   useEffect(() => {
-    if (isFirstLoad.current || loading) return;
+    if (loading) return;
     if (!setupDone) return;
+    // Skip the very first load to avoid overwriting with empty state
+    if (isFirstLoad.current) {
+      isFirstLoad.current = false;
+      return;
+    }
 
     async function syncToSupabase() {
       setSyncing(true);
@@ -161,19 +166,8 @@ export default function BudgetWise() {
         simple_borrows: simpleBorrows,
         setup_done: setupDone,
       };
-
-      // Try update first, then insert if no row exists
-      const { data: existing } = await supabase
-        .from("budgetwise_data")
-        .select("id")
-        .eq("user_id", USER_ID)
-        .single();
-
-      if (existing) {
-        await supabase.from("budgetwise_data").update(payload).eq("user_id", USER_ID);
-      } else {
-        await supabase.from("budgetwise_data").insert(payload);
-      }
+      // upsert = update if exists, insert if not — based on user_id
+      await supabase.from("budgetwise_data").upsert(payload, { onConflict: "user_id" });
       setSyncing(false);
     }
 
