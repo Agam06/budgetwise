@@ -1,4 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
+import { supabase } from "./supabase";
+
+const USER_ID = "agam_budgetwise_user"; // fixed ID since this is a single-user app
 
 const DEFAULT_CATEGORIES = [
   { id: "food", name: "Food & Dining", icon: "🍜", color: "#E8956D", budget: 0 },
@@ -9,7 +12,6 @@ const DEFAULT_CATEGORIES = [
   { id: "others", name: "Others", icon: "📦", color: "#E8D06D", budget: 0 },
 ];
 
-// Real-life inspired interest rates (annual %)
 const INTEREST_RATES = [
   { label: "No Interest (Friendly Borrow)", range: "₹0 – ₹50", rate: 0, description: "Like borrowing from a close friend — you just return exactly what you took. No extra charge." },
   { label: "Low (6% per year)", range: "₹50 – ₹150", rate: 6, description: "Like a loan from a cooperative bank or family member with a small fee. Very affordable." },
@@ -18,44 +20,32 @@ const INTEREST_RATES = [
   { label: "Very High (24% per year)", range: "₹500 & above", rate: 24, description: "Like Buy Now Pay Later (BNPL) or a payday loan. Only use if desperate — costs a lot extra." },
 ];
 
-const STORAGE_KEY = "budgetwise_v3";
-
-function loadData() {
-  try { const r = localStorage.getItem(STORAGE_KEY); if (r) return JSON.parse(r); } catch {}
-  return null;
-}
-function saveData(d) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch {}
-}
 function useIsMobile() {
   const [m, setM] = useState(window.innerWidth < 768);
-  useEffect(() => { const h = () => setM(window.innerWidth < 768); window.addEventListener("resize", h); return () => window.removeEventListener("resize", h); }, []);
+  useEffect(() => {
+    const h = () => setM(window.innerWidth < 768);
+    window.addEventListener("resize", h);
+    return () => window.removeEventListener("resize", h);
+  }, []);
   return m;
 }
 
-// EMI formula: reducing balance method (real bank method)
-// EMI = P * r * (1+r)^n / ((1+r)^n - 1)  where r = monthly rate, n = months
 function calcEMI(principal, annualRate, months) {
   if (annualRate === 0) return { emi: principal / months, totalPayable: principal, totalInterest: 0 };
   const r = annualRate / 100 / 12;
   const emi = principal * r * Math.pow(1 + r, months) / (Math.pow(1 + r, months) - 1);
   const totalPayable = emi * months;
-  const totalInterest = totalPayable - principal;
-  return { emi: Math.round(emi), totalPayable: Math.round(totalPayable), totalInterest: Math.round(totalInterest) };
+  return { emi: Math.round(emi), totalPayable: Math.round(totalPayable), totalInterest: Math.round(totalPayable - principal) };
 }
 
-// Days elapsed since a date string
 function daysElapsed(dateStr) {
   const then = new Date(dateStr.split("/").reverse().join("-"));
-  const now = new Date();
-  return Math.floor((now - then) / (1000 * 60 * 60 * 24));
+  return Math.floor((new Date() - then) / (1000 * 60 * 60 * 24));
 }
 
-// Accrue interest on a loan (reducing balance, daily)
 function getAccruedInterest(loan) {
   if (loan.annualRate === 0) return 0;
-  const days = daysElapsed(loan.takenOn);
-  return Math.round(loan.remainingPrincipal * (loan.annualRate / 100) * (days / 365));
+  return Math.round(loan.remainingPrincipal * (loan.annualRate / 100) * (daysElapsed(loan.takenOn) / 365));
 }
 
 // ── Explanation Modal ──
@@ -67,10 +57,7 @@ function ExplainModal({ title, emoji, lines, onClose, onProceed, proceedLabel = 
         <div style={M.title}>{title}</div>
         <div style={M.lines}>
           {lines.map((l, i) => (
-            <div key={i} style={M.line}>
-              <span style={M.dot}>•</span>
-              <span>{l}</span>
-            </div>
+            <div key={i} style={M.line}><span style={M.dot}>•</span><span>{l}</span></div>
           ))}
         </div>
         <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
@@ -102,28 +89,95 @@ export default function BudgetWise() {
   const [setupDone, setSetupDone] = useState(false);
   const [setupBudgets, setSetupBudgets] = useState({});
   const [txForm, setTxForm] = useState({ category: "", amount: "", note: "" });
-  const [loans, setLoans] = useState([]); // active loans with interest
-  const [simpleBorrows, setSimpleBorrows] = useState([]); // quick no-interest borrows
+  const [loans, setLoans] = useState([]);
+  const [simpleBorrows, setSimpleBorrows] = useState([]);
   const [toast, setToast] = useState(null);
   const [activeTab, setActiveTab] = useState("overview");
-  const [modal, setModal] = useState(null); // { title, emoji, lines, onProceed, proceedLabel }
-
-  // Loan form state
+  const [modal, setModal] = useState(null);
+  const [loading, setLoading] = useState(true); // loading state while fetching from Supabase
+  const [syncing, setSyncing] = useState(false); // show sync indicator
   const [loanForm, setLoanForm] = useState({ from: "", to: "", amount: "", rateIdx: 0, repayType: "", months: 3 });
+  const isFirstLoad = useRef(true);
 
+  // ── LOAD from Supabase on startup ──
   useEffect(() => {
-    const data = loadData();
-    if (data) {
-      if (data.categories) setCategories(data.categories);
-      if (data.transactions) setTransactions(data.transactions);
-      if (data.loans) setLoans(data.loans);
-      if (data.simpleBorrows) setSimpleBorrows(data.simpleBorrows);
-      if (data.setupDone) setSetupDone(data.setupDone);
-    } else { setScreen("setup"); }
+    async function fetchData() {
+      setLoading(true);
+      const { data, error } = await supabase
+        .from("budgetwise_data")
+        .select("*")
+        .eq("user_id", USER_ID)
+        .single();
+
+      if (error || !data) {
+        // No data yet — show setup screen
+        setScreen("setup");
+      } else {
+        if (data.categories) setCategories(data.categories);
+        if (data.transactions) setTransactions(data.transactions);
+        if (data.loans) setLoans(data.loans);
+        if (data.simple_borrows) setSimpleBorrows(data.simple_borrows);
+        if (data.setup_done) setSetupDone(data.setup_done);
+      }
+      setLoading(false);
+      isFirstLoad.current = false;
+    }
+    fetchData();
+
+    // ── REALTIME SYNC — listen for changes from other devices ──
+    const channel = supabase
+      .channel("budgetwise_sync")
+      .on("postgres_changes", {
+        event: "*",
+        schema: "public",
+        table: "budgetwise_data",
+        filter: `user_id=eq.${USER_ID}`,
+      }, (payload) => {
+        const d = payload.new;
+        if (!d) return;
+        if (d.categories) setCategories(d.categories);
+        if (d.transactions) setTransactions(d.transactions);
+        if (d.loans) setLoans(d.loans);
+        if (d.simple_borrows) setSimpleBorrows(d.simple_borrows);
+        if (d.setup_done !== undefined) setSetupDone(d.setup_done);
+      })
+      .subscribe();
+
+    return () => supabase.removeChannel(channel);
   }, []);
 
+  // ── SAVE to Supabase whenever data changes ──
   useEffect(() => {
-    if (setupDone) saveData({ categories, transactions, loans, simpleBorrows, setupDone });
+    if (isFirstLoad.current || loading) return;
+    if (!setupDone) return;
+
+    async function syncToSupabase() {
+      setSyncing(true);
+      const payload = {
+        user_id: USER_ID,
+        categories,
+        transactions,
+        loans,
+        simple_borrows: simpleBorrows,
+        setup_done: setupDone,
+      };
+
+      // Try update first, then insert if no row exists
+      const { data: existing } = await supabase
+        .from("budgetwise_data")
+        .select("id")
+        .eq("user_id", USER_ID)
+        .single();
+
+      if (existing) {
+        await supabase.from("budgetwise_data").update(payload).eq("user_id", USER_ID);
+      } else {
+        await supabase.from("budgetwise_data").insert(payload);
+      }
+      setSyncing(false);
+    }
+
+    syncToSupabase();
   }, [categories, transactions, loans, simpleBorrows, setupDone]);
 
   const showToast = (msg, type = "success") => { setToast({ msg, type }); setTimeout(() => setToast(null), 3200); };
@@ -132,13 +186,23 @@ export default function BudgetWise() {
   const totalBudget = categories.reduce((s, c) => s + c.budget, 0);
   const totalSpent = categories.reduce((s, c) => s + getSpent(c.id), 0);
   const pctUsed = totalBudget > 0 ? Math.min((totalSpent / totalBudget) * 100, 100) : 0;
-
-  // All active loans where this cat is borrower
   const getLoansOwedBy = (catId) => loans.filter(l => l.toId === catId);
-  // All active loans where this cat is lender
   const getLoansOwedTo = (catId) => loans.filter(l => l.fromId === catId);
   const getSimpleBorrowsOwedBy = (catId) => simpleBorrows.filter(b => b.toId === catId);
   const getSimpleBorrowsOwedTo = (catId) => simpleBorrows.filter(b => b.fromId === catId);
+
+  // ── LOADING SCREEN ──
+  if (loading) {
+    return (
+      <div style={{ ...S.page, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: 16 }}>
+        <style>{globalCSS}</style>
+        <div style={{ fontSize: 48 }}>💰</div>
+        <div style={{ fontSize: 20, fontWeight: 800 }}>BudgetWise</div>
+        <div style={{ fontSize: 14, color: "#888" }}>Loading your data...</div>
+        <div style={S.spinner} />
+      </div>
+    );
+  }
 
   // ── SETUP ──
   if (!setupDone || screen === "setup") {
@@ -166,9 +230,20 @@ export default function BudgetWise() {
                 </div>
               ))}
             </div>
-            <button style={S.gradBtn} onClick={() => {
+            <button style={S.gradBtn} onClick={async () => {
               const updated = DEFAULT_CATEGORIES.map(c => ({ ...c, budget: parseFloat(setupBudgets[c.id] || 0) }));
-              setCategories(updated); setSetupDone(true); setScreen("dashboard");
+              setCategories(updated);
+              setSetupDone(true);
+              setScreen("dashboard");
+              // Save to Supabase immediately on setup
+              const payload = { user_id: USER_ID, categories: updated, transactions: [], loans: [], simple_borrows: [], setup_done: true };
+              const { data: existing } = await supabase.from("budgetwise_data").select("id").eq("user_id", USER_ID).single();
+              if (existing) {
+                await supabase.from("budgetwise_data").update(payload).eq("user_id", USER_ID);
+              } else {
+                await supabase.from("budgetwise_data").insert(payload);
+              }
+              isFirstLoad.current = false;
               showToast("Budgets saved! Let's go 🎉");
             }}>Start Tracking →</button>
           </div>
@@ -181,9 +256,13 @@ export default function BudgetWise() {
   // ── SIDEBAR ──
   const sidebar = (
     <div style={S.sidebar}>
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <span style={{ fontSize: 22 }}>💰</span>
-        <span style={{ fontSize: 20, fontWeight: 800, letterSpacing: -0.5 }}>BudgetWise</span>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ fontSize: 22 }}>💰</span>
+          <span style={{ fontSize: 20, fontWeight: 800, letterSpacing: -0.5 }}>BudgetWise</span>
+        </div>
+        {syncing && <span style={S.syncBadge}>⟳ Syncing...</span>}
+        {!syncing && <span style={S.syncedBadge}>✓ Synced</span>}
       </div>
       <div style={S.sidebarSummary}>
         <div style={{ fontSize: 11, color: "#666", textTransform: "uppercase", letterSpacing: 1 }}>Monthly Budget</div>
@@ -229,7 +308,6 @@ export default function BudgetWise() {
   // ── MAIN CONTENT ──
   const mainContent = (
     <div style={S.main}>
-      {/* Topbar */}
       <div style={isMobile ? { ...S.topbar, flexWrap: "wrap", gap: 10 } : S.topbar}>
         <div>
           <div style={S.topbarTitle}>
@@ -239,6 +317,8 @@ export default function BudgetWise() {
           </div>
           <div style={{ fontSize: 13, color: "#666", marginTop: 4 }}>
             {new Date().toLocaleDateString("en-IN", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
+            {isMobile && syncing && <span style={{ marginLeft: 8, color: "#E8956D", fontSize: 11 }}>⟳ Syncing...</span>}
+            {isMobile && !syncing && <span style={{ marginLeft: 8, color: "#6DE8A3", fontSize: 11 }}>✓ Synced</span>}
           </div>
         </div>
         {screen === "dashboard" && (
@@ -249,7 +329,6 @@ export default function BudgetWise() {
         )}
       </div>
 
-      {/* Dashboard tabs */}
       {screen === "dashboard" && (
         <>
           <div style={S.tabs}>
@@ -258,7 +337,6 @@ export default function BudgetWise() {
             ))}
           </div>
 
-          {/* ── OVERVIEW TAB ── */}
           {activeTab === "overview" && (
             <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16 }}>
               {categories.map(cat => {
@@ -294,8 +372,6 @@ export default function BudgetWise() {
                       <span style={{ color: "#555" }}>{Math.round(pct)}% used</span>
                     </div>
                     {rem < 0 && <div style={S.alertRed}>⚠️ Over budget — consider borrowing from another section</div>}
-
-                    {/* Simple borrows this section owes back */}
                     {mySBorrows.length > 0 && (
                       <div style={S.alertBlue}>
                         <div style={{ fontWeight: 700, marginBottom: 6 }}>🤝 Simple Borrows (no interest)</div>
@@ -315,8 +391,6 @@ export default function BudgetWise() {
                         ))}
                       </div>
                     )}
-
-                    {/* Simple borrows this section is owed */}
                     {mySLends.length > 0 && (
                       <div style={S.alertOrange}>
                         <div style={{ fontWeight: 700, marginBottom: 4 }}>💸 Lent out (no interest)</div>
@@ -325,8 +399,6 @@ export default function BudgetWise() {
                         ))}
                       </div>
                     )}
-
-                    {/* Interest-bearing loans this section owes */}
                     {myLoans.map(loan => {
                       const accrued = getAccruedInterest(loan);
                       const totalNowOwed = loan.remainingPrincipal + accrued;
@@ -338,20 +410,19 @@ export default function BudgetWise() {
                             <div>Remaining principal: <strong>₹{loan.remainingPrincipal.toLocaleString()}</strong></div>
                             <div>Interest accrued so far: <strong style={{ color: "#E86D6D" }}>₹{accrued.toLocaleString()}</strong></div>
                             <div>Total you owe right now: <strong style={{ color: "#E8D06D" }}>₹{totalNowOwed.toLocaleString()}</strong></div>
-                            <div style={{ marginTop: 4, color: "#888" }}>Rate: {loan.annualRate}% per year · Taken on: {loan.takenOn}</div>
+                            <div style={{ color: "#888" }}>Rate: {loan.annualRate}% per year · Taken on: {loan.takenOn}</div>
                             {loan.repayType === "emi" && <div style={{ color: "#6DE8A3" }}>EMI: ₹{loan.emi}/month · {loan.emiPaid}/{loan.months} paid</div>}
                           </div>
                           <div style={{ display: "flex", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
                             {loan.repayType === "emi" && loan.emiPaid < loan.months && (
                               <button style={S.returnSmallBtn} onClick={() => {
                                 setModal({
-                                  title: "Pay EMI Installment",
-                                  emoji: "📅",
+                                  title: "Pay EMI Installment", emoji: "📅",
                                   lines: [
                                     `You are paying 1 EMI of ₹${loan.emi.toLocaleString()} for your loan from ${loan.fromName}.`,
-                                    "EMI (Equal Monthly Installment) means you pay a fixed amount each month until the loan is fully repaid.",
+                                    "EMI means you pay a fixed amount each month until the loan is fully repaid.",
                                     `After this payment, you'll have ${loan.months - loan.emiPaid - 1} installments left.`,
-                                    `This ₹${loan.emi} will be deducted from ${cat.name}'s budget and added back to ${loan.fromName}.`,
+                                    `₹${loan.emi} will be deducted from ${cat.name} and added back to ${loan.fromName}.`,
                                   ],
                                   proceedLabel: `Pay ₹${loan.emi} EMI`,
                                   onProceed: () => {
@@ -376,13 +447,12 @@ export default function BudgetWise() {
                             )}
                             <button style={{ ...S.returnSmallBtn, borderColor: "#6DE8A355", color: "#6DE8A3" }} onClick={() => {
                               setModal({
-                                title: "Repay Full Loan",
-                                emoji: "✅",
+                                title: "Repay Full Loan", emoji: "✅",
                                 lines: [
-                                  `You are repaying the entire remaining loan of ₹${loan.remainingPrincipal.toLocaleString()} plus accrued interest of ₹${accrued.toLocaleString()}.`,
+                                  `You are repaying ₹${loan.remainingPrincipal.toLocaleString()} principal + ₹${accrued.toLocaleString()} interest.`,
                                   `Total repayment: ₹${totalNowOwed.toLocaleString()}.`,
                                   "Paying back early is always better — it stops more interest from piling up.",
-                                  `This amount will be moved from ${cat.name} back to ${loan.fromName}.`,
+                                  `This amount will move from ${cat.name} back to ${loan.fromName}.`,
                                 ],
                                 proceedLabel: `Repay ₹${totalNowOwed.toLocaleString()} Now`,
                                 onProceed: () => {
@@ -401,8 +471,6 @@ export default function BudgetWise() {
                         </div>
                       );
                     })}
-
-                    {/* Loans this section gave out */}
                     {myLends.map(loan => {
                       const accrued = getAccruedInterest(loan);
                       return (
@@ -422,7 +490,6 @@ export default function BudgetWise() {
             </div>
           )}
 
-          {/* ── TRANSACTIONS TAB ── */}
           {activeTab === "transactions" && (
             <div style={S.listBox}>
               {transactions.length === 0
@@ -445,10 +512,8 @@ export default function BudgetWise() {
             </div>
           )}
 
-          {/* ── LOANS TAB ── */}
           {activeTab === "loans" && (
             <div>
-              {/* Active interest loans */}
               {loans.length > 0 && (
                 <div style={{ marginBottom: 24 }}>
                   <div style={S.sectionHead}>🏦 Active Loans (with Interest)</div>
@@ -456,24 +521,18 @@ export default function BudgetWise() {
                     {loans.map(loan => {
                       const accrued = getAccruedInterest(loan);
                       const totalOwed = loan.remainingPrincipal + accrued;
-                      const isPending = loan.repayType === "emi" && loan.emiPaid < loan.months;
                       return (
                         <div key={loan.id} style={{ ...S.txRow, flexWrap: "wrap", gap: 8 }}>
                           <div style={{ width: 42, height: 42, borderRadius: 12, background: "#E8D06D22", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, flexShrink: 0 }}>🏦</div>
                           <div style={{ flex: 1, minWidth: 180 }}>
                             <div style={{ fontSize: 14, fontWeight: 700 }}>{loan.fromName} → {loan.toName}</div>
-                            <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>
-                              ₹{loan.principal.toLocaleString()} at {loan.annualRate}% p.a. · {loan.takenOn}
-                            </div>
+                            <div style={{ fontSize: 12, color: "#888", marginTop: 2 }}>₹{loan.principal.toLocaleString()} at {loan.annualRate}% p.a. · {loan.takenOn}</div>
                             <div style={{ fontSize: 12, color: "#E86D6D", marginTop: 2 }}>Interest so far: +₹{accrued.toLocaleString()}</div>
                             {loan.repayType === "emi" && <div style={{ fontSize: 12, color: "#6DE8A3", marginTop: 2 }}>EMI: ₹{loan.emi}/mo · {loan.emiPaid}/{loan.months} paid</div>}
                           </div>
                           <div style={{ textAlign: "right" }}>
                             <div style={{ fontSize: 16, fontWeight: 800, color: "#E8D06D" }}>₹{totalOwed.toLocaleString()}</div>
                             <div style={{ fontSize: 11, color: "#666" }}>total owed now</div>
-                            <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 20, background: "#E8956D22", color: "#E8956D", marginTop: 4, display: "inline-block" }}>
-                              {isPending ? `EMI ${loan.emiPaid}/${loan.months}` : "Active"}
-                            </span>
                           </div>
                         </div>
                       );
@@ -481,8 +540,6 @@ export default function BudgetWise() {
                   </div>
                 </div>
               )}
-
-              {/* Simple borrows */}
               {simpleBorrows.length > 0 && (
                 <div style={{ marginBottom: 24 }}>
                   <div style={S.sectionHead}>🤝 Simple Borrows (No Interest)</div>
@@ -509,7 +566,6 @@ export default function BudgetWise() {
                   </div>
                 </div>
               )}
-
               {loans.length === 0 && simpleBorrows.length === 0 && (
                 <div style={S.empty}>No active loans or borrows. Use "💸 Borrow / Loan" to get started.</div>
               )}
@@ -518,7 +574,6 @@ export default function BudgetWise() {
         </>
       )}
 
-      {/* ── ADD EXPENSE SCREEN ── */}
       {screen === "add-tx" && (
         <div style={S.formBox}>
           <button style={S.backBtn} onClick={() => setScreen("dashboard")}>← Back</button>
@@ -561,25 +616,19 @@ export default function BudgetWise() {
         </div>
       )}
 
-      {/* ── BORROW / LOAN SCREEN ── */}
       {screen === "borrow" && (() => {
         const fromCat = categories.find(c => c.id === loanForm.from);
         const toCat = categories.find(c => c.id === loanForm.to);
         const amt = parseFloat(loanForm.amount) || 0;
         const selectedRate = INTEREST_RATES[loanForm.rateIdx];
         const emiCalc = amt > 0 && loanForm.repayType === "emi" ? calcEMI(amt, selectedRate.rate, loanForm.months) : null;
-
         return (
           <div style={S.formBox}>
             <button style={S.backBtn} onClick={() => setScreen("dashboard")}>← Back</button>
-            <p style={{ color: "#888", fontSize: 14, marginBottom: 24 }}>
-              Take money from one budget section to fund another — like a real internal loan between your own pockets.
-            </p>
-
+            <p style={{ color: "#888", fontSize: 14, marginBottom: 24 }}>Take money from one budget section to fund another — like a real internal loan between your own pockets.</p>
             <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 32 }}>
-              {/* LEFT: From/To/Amount */}
               <div>
-                <label style={S.label}>Borrow FROM (the lender section)</label>
+                <label style={S.label}>Borrow FROM</label>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 20 }}>
                   {categories.filter(c => getRemaining(c) > 0).map(c => (
                     <div key={c.id} style={{ ...S.chip, background: loanForm.from === c.id ? c.color : "#1e1e35", borderColor: c.color, color: loanForm.from === c.id ? "#000" : "#fff" }}
@@ -588,41 +637,21 @@ export default function BudgetWise() {
                       <span style={{ display: "block", fontSize: 11, opacity: 0.8 }}>₹{getRemaining(c).toLocaleString()} left</span>
                     </div>
                   ))}
-                  {categories.filter(c => getRemaining(c) > 0).length === 0 && <div style={S.empty}>No sections have money left to lend.</div>}
                 </div>
-
-                <label style={S.label}>Borrow TO (the borrower section)</label>
+                <label style={S.label}>Borrow TO</label>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 20 }}>
                   {categories.filter(c => c.id !== loanForm.from).map(c => (
                     <div key={c.id} style={{ ...S.chip, background: loanForm.to === c.id ? c.color : "#1e1e35", borderColor: c.color, color: loanForm.to === c.id ? "#000" : "#fff" }}
-                      onClick={() => setLoanForm({ ...loanForm, to: c.id })}>
-                      {c.icon} {c.name}
-                    </div>
+                      onClick={() => setLoanForm({ ...loanForm, to: c.id })}>{c.icon} {c.name}</div>
                   ))}
                 </div>
-
-                <label style={S.label}>Amount to Borrow (₹)</label>
-                <input style={{ ...S.input, marginBottom: 0 }} type="number" placeholder="Enter amount"
-                  value={loanForm.amount} onChange={e => setLoanForm({ ...loanForm, amount: e.target.value })} />
-                {fromCat && amt > getRemaining(fromCat) && (
-                  <div style={{ fontSize: 12, color: "#E86D6D", marginTop: 8 }}>⚠️ {fromCat.name} only has ₹{getRemaining(fromCat).toLocaleString()} available</div>
-                )}
+                <label style={S.label}>Amount (₹)</label>
+                <input style={S.input} type="number" placeholder="Enter amount" value={loanForm.amount} onChange={e => setLoanForm({ ...loanForm, amount: e.target.value })} />
+                {fromCat && amt > getRemaining(fromCat) && <div style={{ fontSize: 12, color: "#E86D6D", marginTop: 8 }}>⚠️ Only ₹{getRemaining(fromCat).toLocaleString()} available</div>}
               </div>
-
-              {/* RIGHT: Interest rate + repayment */}
               <div>
-                {/* Interest Rate Selector */}
                 <label style={S.label}>Interest Rate
-                  <span style={S.whatIsThis} onClick={() => setModal({
-                    title: "What is Interest Rate?",
-                    emoji: "📈",
-                    lines: [
-                      "Interest is the extra money you pay for borrowing. Think of it as a 'fee' for using someone else's money.",
-                      "It's shown as a % per year. So 12% per year means for every ₹100 you borrow, you pay ₹12 extra every year.",
-                      "The higher the rate, the more expensive the loan. A 0% loan means you return exactly what you borrowed — like borrowing from a trusted friend.",
-                      "Real banks in India charge 10–24% for personal loans depending on your credit history.",
-                    ]
-                  })}>  ❓ What is this?</span>
+                  <span style={S.whatIsThis} onClick={() => setModal({ title: "What is Interest Rate?", emoji: "📈", lines: ["Interest is the extra money you pay for borrowing. Think of it as a fee for using someone else's money.", "It's shown as a % per year. So 12% means for every ₹100 you borrow, you pay ₹12 extra every year.", "The higher the rate, the more expensive the loan. 0% means you return exactly what you borrowed.", "Real banks in India charge 10–24% for personal loans."] })}>  ❓ What is this?</span>
                 </label>
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
                   {INTEREST_RATES.map((r, i) => (
@@ -639,24 +668,13 @@ export default function BudgetWise() {
                     </div>
                   ))}
                 </div>
-
-                {/* Repayment Type */}
                 {selectedRate.rate > 0 && (
                   <>
                     <label style={S.label}>How will you repay?
-                      <span style={S.whatIsThis} onClick={() => setModal({
-                        title: "EMI vs Lump Sum — What's the difference?",
-                        emoji: "💡",
-                        lines: [
-                          "LUMP SUM means you pay everything back at once — the full amount plus interest. Best if you'll have the money soon.",
-                          "EMI (Equal Monthly Installment) means you split the repayment into equal monthly payments. Like paying ₹200/month for 6 months instead of ₹1200 at once.",
-                          "EMI makes it easier to manage — but you end up paying more total because interest keeps adding up each month.",
-                          "Example: Borrow ₹1000 at 12%/year for 6 months → EMI ≈ ₹172/month → Total paid ≈ ₹1033.",
-                        ]
-                      })}>  ❓ What is this?</span>
+                      <span style={S.whatIsThis} onClick={() => setModal({ title: "EMI vs Lump Sum", emoji: "💡", lines: ["LUMP SUM means you pay everything back at once — principal plus interest.", "EMI means you split the repayment into equal monthly payments.", "EMI is easier to manage but you pay more total due to interest each month.", "Example: Borrow ₹1000 at 12%/year for 6 months → EMI ≈ ₹172/month → Total ≈ ₹1033."] })}>  ❓ What is this?</span>
                     </label>
                     <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
-                      {[["lumpsum", "💰 Lump Sum", "Pay everything back at once"], ["emi", "📅 EMI", "Pay in monthly installments"]].map(([val, label, desc]) => (
+                      {[["lumpsum", "💰 Lump Sum", "Pay all at once"], ["emi", "📅 EMI", "Pay monthly"]].map(([val, label, desc]) => (
                         <div key={val} style={{ ...S.repayCard, borderColor: loanForm.repayType === val ? "#6DE8A3" : "#ffffff15", background: loanForm.repayType === val ? "#6DE8A315" : "#1a1a2e", flex: 1 }}
                           onClick={() => setLoanForm({ ...loanForm, repayType: val })}>
                           <div style={{ fontSize: 14, fontWeight: 700, color: loanForm.repayType === val ? "#6DE8A3" : "#fff" }}>{label}</div>
@@ -666,72 +684,44 @@ export default function BudgetWise() {
                     </div>
                   </>
                 )}
-
-                {/* EMI months selector */}
                 {loanForm.repayType === "emi" && (
                   <div style={{ marginBottom: 20 }}>
                     <label style={S.label}>Number of Monthly Installments</label>
                     <div style={{ display: "flex", gap: 8 }}>
                       {[3, 6, 9, 12].map(m => (
                         <div key={m} style={{ ...S.monthChip, borderColor: loanForm.months === m ? "#6DE8A3" : "#333", background: loanForm.months === m ? "#6DE8A322" : "#1a1a2e", color: loanForm.months === m ? "#6DE8A3" : "#888" }}
-                          onClick={() => setLoanForm({ ...loanForm, months: m })}>{m} months</div>
+                          onClick={() => setLoanForm({ ...loanForm, months: m })}>{m} mo</div>
                       ))}
                     </div>
                   </div>
                 )}
-
-                {/* Summary card */}
                 {fromCat && toCat && amt > 0 && (loanForm.repayType || selectedRate.rate === 0) && (
                   <div style={S.summaryCard}>
-                    <div style={{ fontSize: 13, fontWeight: 800, color: "#E8D06D", marginBottom: 10 }}>📋 Loan Summary — Read Before Proceeding</div>
+                    <div style={{ fontSize: 13, fontWeight: 800, color: "#E8D06D", marginBottom: 10 }}>📋 Loan Summary</div>
                     <div style={{ fontSize: 13, color: "#ccc", lineHeight: 2 }}>
                       <div>💸 <strong>{toCat.name}</strong> borrows <strong>₹{amt.toLocaleString()}</strong> from <strong>{fromCat.name}</strong></div>
-                      <div>📈 Interest rate: <strong>{selectedRate.rate === 0 ? "None (friendly borrow)" : `${selectedRate.rate}% per year`}</strong></div>
+                      <div>📈 Rate: <strong>{selectedRate.rate === 0 ? "None" : `${selectedRate.rate}% per year`}</strong></div>
                       {emiCalc && <>
-                        <div>📅 Monthly EMI: <strong style={{ color: "#6DE8A3" }}>₹{emiCalc.emi.toLocaleString()}</strong> × {loanForm.months} months</div>
-                        <div>💰 Total you'll pay back: <strong style={{ color: "#E8956D" }}>₹{emiCalc.totalPayable.toLocaleString()}</strong></div>
-                        <div>🔴 Extra paid as interest: <strong style={{ color: "#E86D6D" }}>₹{emiCalc.totalInterest.toLocaleString()}</strong></div>
+                        <div>📅 EMI: <strong style={{ color: "#6DE8A3" }}>₹{emiCalc.emi.toLocaleString()}</strong> × {loanForm.months} months</div>
+                        <div>💰 Total payback: <strong style={{ color: "#E8956D" }}>₹{emiCalc.totalPayable.toLocaleString()}</strong></div>
+                        <div>🔴 Interest: <strong style={{ color: "#E86D6D" }}>₹{emiCalc.totalInterest.toLocaleString()}</strong></div>
                       </>}
-                      {loanForm.repayType === "lumpsum" && selectedRate.rate > 0 && (
-                        <div>⏰ <strong>Interest keeps growing daily</strong> until you repay in full</div>
-                      )}
                       {selectedRate.rate === 0 && <div>✅ No interest — return exactly ₹{amt.toLocaleString()}</div>}
                     </div>
                   </div>
                 )}
-
                 <button style={{ ...S.gradBtn, marginTop: 16 }} onClick={() => {
                   if (!loanForm.from || !loanForm.to || !loanForm.amount) return showToast("Please fill all fields", "error");
                   if (amt <= 0) return showToast("Enter a valid amount", "error");
-                  if (!fromCat || amt > getRemaining(fromCat)) return showToast(`Only ₹${getRemaining(fromCat)} available in ${fromCat?.name}`, "error");
-                  if (selectedRate.rate > 0 && !loanForm.repayType) return showToast("Please choose a repayment method", "error");
-
+                  if (!fromCat || amt > getRemaining(fromCat)) return showToast(`Only ₹${getRemaining(fromCat)} available`, "error");
+                  if (selectedRate.rate > 0 && !loanForm.repayType) return showToast("Choose a repayment method", "error");
                   const explainLines = selectedRate.rate === 0
-                    ? [
-                        `${toCat.name} will borrow ₹${amt.toLocaleString()} from ${fromCat.name}.`,
-                        "This is a friendly borrow — no interest, just return the same amount.",
-                        `${fromCat.name}'s budget will decrease by ₹${amt.toLocaleString()} and ${toCat.name}'s will increase.`,
-                        "You can return this anytime from the Overview card.",
-                      ]
+                    ? [`${toCat.name} borrows ₹${amt.toLocaleString()} from ${fromCat.name}.`, "No interest — just return the same amount.", `${fromCat.name}'s budget decreases, ${toCat.name}'s increases.`, "Return anytime from the Overview card."]
                     : loanForm.repayType === "emi"
-                    ? [
-                        `${toCat.name} borrows ₹${amt.toLocaleString()} from ${fromCat.name} at ${selectedRate.rate}% per year.`,
-                        `You'll repay in ${loanForm.months} monthly installments of ₹${emiCalc?.emi.toLocaleString()} each.`,
-                        `Total amount you'll pay back: ₹${emiCalc?.totalPayable.toLocaleString()} (including ₹${emiCalc?.totalInterest.toLocaleString()} as interest).`,
-                        "Each month, click 'Pay EMI' on the card to make a payment.",
-                        "Missing payments causes more interest to pile up — pay on time!",
-                      ]
-                    : [
-                        `${toCat.name} borrows ₹${amt.toLocaleString()} from ${fromCat.name} at ${selectedRate.rate}% per year.`,
-                        "You've chosen Lump Sum — meaning you'll pay back the full amount + interest all at once.",
-                        "Interest adds up every day until you repay. The sooner you repay, the less you pay.",
-                        "Click 'Repay Full' on the card whenever you're ready.",
-                      ];
-
+                    ? [`${toCat.name} borrows ₹${amt.toLocaleString()} from ${fromCat.name} at ${selectedRate.rate}% per year.`, `Repay in ${loanForm.months} monthly installments of ₹${emiCalc?.emi.toLocaleString()}.`, `Total payback: ₹${emiCalc?.totalPayable.toLocaleString()} (₹${emiCalc?.totalInterest.toLocaleString()} as interest).`, "Click 'Pay EMI' each month on the Overview card."]
+                    : [`${toCat.name} borrows ₹${amt.toLocaleString()} from ${fromCat.name} at ${selectedRate.rate}% per year.`, "Lump Sum — pay back everything at once when ready.", "Interest adds up every day until you repay.", "Click 'Repay Full' on the card whenever ready."];
                   setModal({
-                    title: "Confirm Loan",
-                    emoji: "🏦",
-                    lines: explainLines,
+                    title: "Confirm Loan", emoji: "🏦", lines: explainLines,
                     proceedLabel: "Confirm & Take Loan",
                     onProceed: () => {
                       const id = Date.now();
@@ -748,7 +738,7 @@ export default function BudgetWise() {
                       }
                       setLoanForm({ from: "", to: "", amount: "", rateIdx: 0, repayType: "", months: 3 });
                       setScreen("dashboard"); setActiveTab("loans");
-                      showToast(`Loan of ₹${amt} from ${fromCat.name} → ${toCat.name} ✓`);
+                      showToast(`Loan of ₹${amt} created ✓`);
                       setModal(null);
                     }
                   });
@@ -801,16 +791,20 @@ const globalCSS = `
   input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; }
   ::-webkit-scrollbar { width: 6px; } ::-webkit-scrollbar-track { background: #1a1a2e; }
   ::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 `;
 
 const S = {
   page: { minHeight: "100vh", background: "#0d0d1a", fontFamily: "DM Sans, sans-serif", color: "#f0f0f0" },
   layout: { display: "flex", minHeight: "100vh" },
+  spinner: { width: 32, height: 32, border: "3px solid #333", borderTop: "3px solid #E8956D", borderRadius: "50%", animation: "spin 0.8s linear infinite" },
   sidebar: { width: 280, minHeight: "100vh", background: "#111128", borderRight: "1px solid #ffffff0a", padding: "28px 20px", display: "flex", flexDirection: "column", gap: 20, position: "sticky", top: 0, height: "100vh", overflowY: "auto" },
   sidebarSummary: { background: "#1a1a35", borderRadius: 16, padding: 16, border: "1px solid #ffffff0a" },
   sidebarProgressBg: { height: 6, background: "#ffffff0f", borderRadius: 10, overflow: "hidden" },
   sidebarProgressFill: { height: "100%", borderRadius: 10, transition: "width 0.5s" },
   sidebarEditBtn: { background: "transparent", border: "1px solid #333", color: "#888", padding: "10px 16px", borderRadius: 10, fontSize: 13, cursor: "pointer", fontFamily: "DM Sans, sans-serif" },
+  syncBadge: { fontSize: 11, color: "#E8956D", background: "#E8956D15", padding: "3px 8px", borderRadius: 20 },
+  syncedBadge: { fontSize: 11, color: "#6DE8A3", background: "#6DE8A315", padding: "3px 8px", borderRadius: 20 },
   main: { flex: 1, padding: 32, overflowY: "auto", maxHeight: "100vh" },
   topbar: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 28 },
   topbarTitle: { fontSize: 26, fontWeight: 800, letterSpacing: -0.5 },
