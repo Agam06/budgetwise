@@ -2,6 +2,9 @@ import { useState, useEffect, useRef } from "react";
 import { supabase } from "./supabase";
 import { DEFAULT_CATEGORIES } from "./constants/categories";
 import { INTEREST_RATES } from "./constants/interestRates";
+import { calcEMI,
+         daysElapsed, 
+         getAccruedInterest} from "./utils/loanCalculations";
 
 const USER_ID = "agam_budgetwise_user"; // fixed ID since this is a single-user app
 
@@ -14,24 +17,6 @@ function useIsMobile() {
     return () => window.removeEventListener("resize", h);
   }, []);
   return m;
-}
-
-function calcEMI(principal, annualRate, months) {
-  if (annualRate === 0) return { emi: principal / months, totalPayable: principal, totalInterest: 0 };
-  const r = annualRate / 100 / 12;
-  const emi = principal * r * Math.pow(1 + r, months) / (Math.pow(1 + r, months) - 1);
-  const totalPayable = emi * months;
-  return { emi: Math.round(emi), totalPayable: Math.round(totalPayable), totalInterest: Math.round(totalPayable - principal) };
-}
-
-function daysElapsed(dateStr) {
-  const then = new Date(dateStr.split("/").reverse().join("-"));
-  return Math.floor((new Date() - then) / (1000 * 60 * 60 * 24));
-}
-
-function getAccruedInterest(loan) {
-  if (loan.annualRate === 0) return 0;
-  return Math.round(loan.remainingPrincipal * (loan.annualRate / 100) * (daysElapsed(loan.takenOn) / 365));
 }
 
 // ── Explanation Modal ──
