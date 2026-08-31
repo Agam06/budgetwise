@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { supabase } from "./supabase";
+import { supabase } from "./services/supabase";
 import { DEFAULT_CATEGORIES } from "./constants/categories";
 import { INTEREST_RATES } from "./constants/interestRates";
 import { calcEMI,
