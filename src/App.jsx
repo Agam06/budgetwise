@@ -1,10 +1,17 @@
 import { useState, useEffect, useRef } from "react";
-import { supabase } from "./services/supabase";
 import { DEFAULT_CATEGORIES } from "./constants/categories";
 import { INTEREST_RATES } from "./constants/interestRates";
+import { fetchBudgetwiseData,
+         saveBudgetwiseData,
+         saveInitialSetup,
+         subscribeToBudgetwiseData,
+         unsubscribeFromBudgetwiseData,
+} from "./services/budgetwiseDataService";
+
 import { calcEMI,
          daysElapsed, 
-         getAccruedInterest} from "./utils/loanCalculations";
+         getAccruedInterest,
+} from "./utils/loanCalculations";
 
 const USER_ID = "agam_budgetwise_user"; // fixed ID since this is a single-user app
 
@@ -74,11 +81,7 @@ export default function BudgetWise() {
   useEffect(() => {
     async function fetchData() {
       setLoading(true);
-      const { data, error } = await supabase
-        .from("budgetwise_data")
-        .select("*")
-        .eq("user_id", USER_ID)
-        .single();
+      const { data, error } = await fetchBudgetwiseData(USER_ID);
 
       if (error || !data) {
         // No data yet — show setup screen
@@ -96,25 +99,19 @@ export default function BudgetWise() {
     fetchData();
 
     // ── REALTIME SYNC — listen for changes from other devices ──
-    const channel = supabase
-      .channel("budgetwise_sync")
-      .on("postgres_changes", {
-        event: "*",
-        schema: "public",
-        table: "budgetwise_data",
-        filter: `user_id=eq.${USER_ID}`,
-      }, (payload) => {
-        const d = payload.new;
-        if (!d) return;
-        if (d.categories) setCategories(d.categories);
-        if (d.transactions) setTransactions(d.transactions);
-        if (d.loans) setLoans(d.loans);
-        if (d.simple_borrows) setSimpleBorrows(d.simple_borrows);
-        if (d.setup_done !== undefined) setSetupDone(d.setup_done);
-      })
-      .subscribe();
+    const channel = subscribeToBudgetwiseData(USER_ID, (payload) => {
+      const d = payload.new;
+    
+      if (!d) return;
+    
+      if (d.categories) setCategories(d.categories);
+      if (d.transactions) setTransactions(d.transactions);
+      if (d.loans) setLoans(d.loans);
+      if (d.simple_borrows) setSimpleBorrows(d.simple_borrows);
+      if (d.setup_done !== undefined) setSetupDone(d.setup_done);
+    });
 
-    return () => supabase.removeChannel(channel);
+    return () => unsubscribeFromBudgetwiseData(channel);
   }, []);
 
   // ── SAVE to Supabase whenever data changes ──
@@ -129,16 +126,13 @@ export default function BudgetWise() {
 
     async function syncToSupabase() {
       setSyncing(true);
-      const payload = {
-        user_id: USER_ID,
+      await saveBudgetwiseData(USER_ID, {
         categories,
         transactions,
         loans,
-        simple_borrows: simpleBorrows,
-        setup_done: setupDone,
-      };
-      // upsert = update if exists, insert if not — based on user_id
-      await supabase.from("budgetwise_data").upsert(payload, { onConflict: "user_id" });
+        simpleBorrows,
+        setupDone,
+      });
       setSyncing(false);
     }
 
@@ -201,13 +195,7 @@ export default function BudgetWise() {
               setSetupDone(true);
               setScreen("dashboard");
               // Save to Supabase immediately on setup
-              const payload = { user_id: USER_ID, categories: updated, transactions: [], loans: [], simple_borrows: [], setup_done: true };
-              const { data: existing } = await supabase.from("budgetwise_data").select("id").eq("user_id", USER_ID).single();
-              if (existing) {
-                await supabase.from("budgetwise_data").update(payload).eq("user_id", USER_ID);
-              } else {
-                await supabase.from("budgetwise_data").insert(payload);
-              }
+              await saveInitialSetup(USER_ID, updated);
               isFirstLoad.current = false;
               showToast("Budgets saved! Let's go 🎉");
             }}>Start Tracking →</button>
