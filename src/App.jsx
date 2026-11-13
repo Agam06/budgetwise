@@ -1,4 +1,7 @@
+import ExplainModal from "./components/ExplainModal";
+import Toast from "./components/Toast";
 import { useState, useEffect, useRef } from "react";
+import useIsMobile from "./hooks/useIsMobile";
 import { DEFAULT_CATEGORIES } from "./constants/categories";
 import { INTEREST_RATES } from "./constants/interestRates";
 import { fetchBudgetwiseData,
@@ -16,48 +19,9 @@ import { calcEMI,
 const USER_ID = "agam_budgetwise_user"; // fixed ID since this is a single-user app
 
 
-function useIsMobile() {
-  const [m, setM] = useState(window.innerWidth < 768);
-  useEffect(() => {
-    const h = () => setM(window.innerWidth < 768);
-    window.addEventListener("resize", h);
-    return () => window.removeEventListener("resize", h);
-  }, []);
-  return m;
-}
 
 // ── Explanation Modal ──
-function ExplainModal({ title, emoji, lines, onClose, onProceed, proceedLabel = "Proceed" }) {
-  return (
-    <div style={M.overlay}>
-      <div style={M.box}>
-        <div style={M.emoji}>{emoji}</div>
-        <div style={M.title}>{title}</div>
-        <div style={M.lines}>
-          {lines.map((l, i) => (
-            <div key={i} style={M.line}><span style={M.dot}>•</span><span>{l}</span></div>
-          ))}
-        </div>
-        <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
-          <button style={M.cancelBtn} onClick={onClose}>← Go Back</button>
-          {onProceed && <button style={M.proceedBtn} onClick={onProceed}>{proceedLabel} →</button>}
-        </div>
-      </div>
-    </div>
-  );
-}
 
-const M = {
-  overlay: { position: "fixed", inset: 0, background: "#000000cc", zIndex: 1000, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 },
-  box: { background: "#1a1a35", borderRadius: 20, padding: 28, maxWidth: 460, width: "100%", border: "1px solid #ffffff15" },
-  emoji: { fontSize: 40, textAlign: "center", marginBottom: 12 },
-  title: { fontSize: 18, fontWeight: 800, color: "#fff", textAlign: "center", marginBottom: 16 },
-  lines: { display: "flex", flexDirection: "column", gap: 10 },
-  line: { display: "flex", gap: 10, fontSize: 14, color: "#ccc", lineHeight: 1.5 },
-  dot: { color: "#E8956D", fontWeight: 700, flexShrink: 0 },
-  cancelBtn: { flex: 1, padding: "12px", background: "transparent", border: "1px solid #444", color: "#888", borderRadius: 10, cursor: "pointer", fontFamily: "DM Sans, sans-serif", fontWeight: 600, fontSize: 14 },
-  proceedBtn: { flex: 1, padding: "12px", background: "linear-gradient(135deg,#E8956D,#B96DE8)", border: "none", color: "#fff", borderRadius: 10, cursor: "pointer", fontFamily: "DM Sans, sans-serif", fontWeight: 700, fontSize: 14 },
-};
 
 export default function BudgetWise() {
   const isMobile = useIsMobile();
@@ -729,13 +693,7 @@ export default function BudgetWise() {
   );
 }
 
-function Toast({ toast }) {
-  return (
-    <div style={{ position: "fixed", bottom: 32, left: "50%", transform: "translateX(-50%)", background: toast.type === "error" ? "#E86D6D" : "#6DE8A3", color: "#0d0d1a", padding: "12px 24px", borderRadius: 30, fontFamily: "DM Sans, sans-serif", fontWeight: 700, fontSize: 14, boxShadow: "0 4px 24px rgba(0,0,0,0.5)", zIndex: 9999 }}>
-      {toast.msg}
-    </div>
-  );
-}
+
 
 const globalCSS = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap');
